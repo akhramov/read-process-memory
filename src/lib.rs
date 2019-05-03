@@ -150,6 +150,7 @@ mod platform {
     fn task_for_pid(pid: pid_t) -> io::Result<mach_port_name_t> {
         let mut task: mach_port_name_t = MACH_PORT_NULL;
 
+        println!("Getting mach task: {}", task);
         unsafe {
             let result =
                 mach::traps::task_for_pid(mach::traps::mach_task_self(), pid as c_int, &mut task);
@@ -158,6 +159,7 @@ mod platform {
             }
         }
 
+        println!("Mach task: {}", task);
         Ok(task)
     }
 
@@ -204,6 +206,7 @@ mod platform {
             };
 
             if result != KERN_SUCCESS {
+                println!("vm_read failed with {}", result);
                 return Err(io::Error::last_os_error());
             }
 
@@ -461,7 +464,9 @@ mod test {
 
     fn read_test_process(args: Option<&[&str]>) -> io::Result<Vec<u8>> {
         // Spawn a child process and attempt to read its memory.
+        println!("before test_process_path");
         let path = test_process_path().unwrap();
+        println!("after test_process_path");
         let mut cmd = Command::new(&path);
         {
             cmd.stdin(Stdio::piped())
