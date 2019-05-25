@@ -205,7 +205,7 @@ mod platform {
         fn copy_address(&self, addr: usize, buf: &mut [u8]) -> io::Result<()> {
             let mut read_len = buf.len() as vm_size_t;
             let result = unsafe {
-                vm_read_overwrite(*self,
+                vm_read_overwrite(self.0,
                                   addr as vm_address_t,
                                   buf.len() as vm_size_t,
                                   buf.as_mut_ptr() as vm_address_t,
@@ -228,7 +228,8 @@ mod platform {
 
 #[cfg(target_os="freebsd")]
 mod platform {
-    use libc::{pid_t, c_void, c_int, waitpid, WIFSTOPPED, PT_ATTACH, PT_DETACH, PT_IO};
+    use libc::{pid_t, c_void, c_int};
+    use libc::{waitpid, WIFSTOPPED, PT_ATTACH, PT_DETACH, PT_IO, EBUSY};
     use std::convert::TryFrom;
     use std::{io, ptr};
     use std::process::Child;
@@ -247,6 +248,17 @@ mod platform {
         piod_offs: *mut c_void,
         piod_addr: *mut c_void,
         piod_len: usize,
+    }
+
+    /// If process is already traced, PT_ATTACH call returns
+    /// EBUSY. This structure is needed to avoid double locking the process.
+    /// - `Release` variant means we can safely detach from the process.
+    /// - `NoRelease` variant means that process was already attached, so we
+    ///    shall not attempt to detach from it.
+    #[derive(PartialEq)]
+    enum PtraceLockState {
+        Release,
+        NoRelease,
     }
 
     extern "C" {
@@ -281,13 +293,20 @@ mod platform {
     }
 
     /// Attach to a process `pid` and wait for the process to be stopped.
-    fn ptrace_attach(pid: Pid) -> io::Result<()> {
+    fn ptrace_attach(pid: Pid) -> io::Result<PtraceLockState> {
         let attach_status = unsafe {
             ptrace(PT_ATTACH, pid, ptr::null_mut(), 0)
         };
 
-        if attach_status == -1 {
-            return Err(io::Error::last_os_error())
+        let last_error = io::Error::last_os_error();
+
+        if let Some(error) = last_error.raw_os_error() {
+            if attach_status == -1 {
+                return match error {
+                    EBUSY => Ok(PtraceLockState::NoRelease),
+                    _ => Err(last_error),
+                }
+            }
         }
 
         let mut wait_status = 0;
@@ -300,7 +319,7 @@ mod platform {
         if !stopped {
             Err(io::Error::last_os_error())
         } else {
-            Ok(())
+            Ok(PtraceLockState::Release)
         }
     }
 
@@ -341,11 +360,15 @@ mod platform {
 
     impl CopyAddress for ProcessHandle {
         fn copy_address(&self, addr: usize, buf: &mut [u8]) -> io::Result<()> {
-            ptrace_attach(self.0)?;
+            let should_detach = ptrace_attach(self.0)? == PtraceLockState::Release;
 
             ptrace_io(self.0, addr, buf)?;
 
-            ptrace_detach(self.0)
+            if should_detach {
+                ptrace_detach(self.0)
+            } else {
+                Ok(())
+            }
         }
     }
 }
